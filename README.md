@@ -48,6 +48,12 @@ Adjacent report sessions with short gaps are also merged by default using the sa
 
 Debug mode also warns about suspicious `tracker/start` rows separated by a long gap with no `tracker/stop` in between, and suggests which earlier row to remove if it looks like a bad wake-up event.
 
+To export the report as CSV, pass `--csv`. Use `--output` to write the result to a file:
+
+```bash
+python3 timetrack_report.py --csv --output report.csv
+```
+
 ## Local CSV Replay
 
 To inspect the raw log in local time, run:

@@ -440,6 +440,32 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
     print(f"Total active hours: {total_hours:.2f}")
 
 
+def write_report_csv(sessions: List[SessionReport], output_file) -> None:
+    writer = csv.writer(output_file)
+    headers = ["Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
+    writer.writerow(headers)
+
+    for session in sessions:
+        for segment in split_session_by_midnight(session):
+            start_local = segment.start
+            end_local = segment.end
+            session_hours = (segment.end - segment.start).total_seconds() / 3600.0
+            screensaver_hours = segment_screensaver_seconds(session, segment) / 3600.0
+            active_hours = max(0.0, session_hours - screensaver_hours)
+            capped = session.capped and segment.end == session.end
+            writer.writerow(
+                [
+                    format_local_date(start_local),
+                    format_local_time(start_local),
+                    f"{active_hours:.2f}",
+                    format_local_time(end_local),
+                    f"{session_hours:.2f}",
+                    f"{screensaver_hours:.2f}",
+                    "yes" if capped else "",
+                ]
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate a session report from timetrack activity logs.")
     parser.add_argument(
@@ -464,6 +490,16 @@ def main() -> int:
         type=int,
         default=int(DEFAULT_SESSION_MERGE_GAP.total_seconds() // 60),
         help="Merge adjacent sessions with gaps shorter than this many minutes",
+    )
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="Output the report as CSV instead of a table",
+    )
+    parser.add_argument(
+        "--output",
+        type=parse_path,
+        help="Write the report to this file instead of stdout",
     )
     args = parser.parse_args()
 
@@ -502,7 +538,21 @@ def main() -> int:
     )
     if args.debug:
         debug_print_tracker_start_anomalies(events)
-    print_report(sessions, debug=args.debug)
+    if args.output is not None:
+        with args.output.expanduser().open("w", newline="") as output_file:
+            if args.csv:
+                write_report_csv(sessions, output_file)
+            else:
+                original_stdout = sys.stdout
+                try:
+                    sys.stdout = output_file
+                    print_report(sessions, debug=args.debug)
+                finally:
+                    sys.stdout = original_stdout
+    elif args.csv:
+        write_report_csv(sessions, sys.stdout)
+    else:
+        print_report(sessions, debug=args.debug)
     return 0
 
 
