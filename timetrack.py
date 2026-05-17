@@ -10,6 +10,7 @@ import signal
 import csv
 import threading
 import pwd
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -125,6 +126,8 @@ class SessionActivityTracker:
         self.session_bus = None
         self.loop = None
         self.running = False
+        self.current_session_id = None
+        self.current_username = _get_current_username()
         
         # Set up signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -168,17 +171,23 @@ class SessionActivityTracker:
         try:
             session = self.system_bus.get('org.freedesktop.login1', session_path)
             username = _get_session_username(session)
+            if self.current_username and username and username != self.current_username:
+                return
             details = f"session_id={session_id}"
             if username:
                 details += f",user={username}"
             self.logger.log_event('session', 'login', details)
+            self.current_session_id = session_id
         except Exception as e:
             print(f"Warning: Could not log new session {session_id}: {e}", file=sys.stderr)
 
     def _on_session_removed(self, session_id: str, session_path: str):
         """Handle removed logind sessions."""
         try:
+            if self.current_session_id and session_id != self.current_session_id:
+                return
             self.logger.log_event('session', 'logout', f"session_id={session_id}")
+            self.current_session_id = None
         except Exception as e:
             print(f"Warning: Could not log removed session {session_id}: {e}", file=sys.stderr)
 
@@ -197,6 +206,8 @@ class SessionActivityTracker:
             session_id, session = current
             active = getattr(session, 'Active', None)
             if active:
+                self.current_session_id = session_id
+                username = _get_session_username(session) or username
                 details = _session_details(session_id, session)
                 if username and 'user=' not in details:
                     details += f",user={username}"
@@ -206,6 +217,7 @@ class SessionActivityTracker:
                 if username:
                     details += f",user={username}"
                 self.logger.log_event('session', 'active', details)
+                self.current_session_id = session_id
         except Exception as e:
             username = _get_current_username()
             details = f"startup=true"
@@ -217,53 +229,59 @@ class SessionActivityTracker:
     def start(self):
         """Start monitoring session activity."""
         self.running = True
-        
-        try:
-            # Connect to D-Bus
-            self.system_bus = SystemBus()
-            self.session_bus = SessionBus()
-            
-            # Monitor systemd-logind for suspend/resume and shutdown
-            login1 = self.system_bus.get('org.freedesktop.login1')
-            login1.PrepareForSleep.connect(self._on_prepare_for_sleep)
-            login1.PrepareForShutdown.connect(self._on_prepare_for_shutdown)
-            try:
-                login1.SessionNew.connect(self._on_session_new)
-                login1.SessionRemoved.connect(self._on_session_removed)
-            except Exception as e:
-                print(f"Warning: Could not connect to session login events: {e}", file=sys.stderr)
-            
-            # Monitor Gnome Screensaver
-            try:
-                screensaver = self.session_bus.get('org.gnome.ScreenSaver')
-                screensaver.ActiveChanged.connect(self._on_screensaver_active_changed)
-            except Exception as e:
-                print(f"Warning: Could not connect to screensaver: {e}", file=sys.stderr)
-            
-            # Monitor current session state changes
-            try:
-                session_id = os.environ.get('XDG_SESSION_ID')
-                if session_id:
-                    session_path = f'/org/freedesktop/login1/session/{session_id}'
-                    session = self.system_bus.get('org.freedesktop.login1', session_path)
-                    session.onPropertiesChanged = self._on_session_properties_changed
-            except Exception as e:
-                print(f"Warning: Could not monitor session state: {e}", file=sys.stderr)
 
-            self._log_current_session_state()
-            
-            # Log startup
-            self.logger.log_event('tracker', 'start', '')
-            print("Session activity tracker started", file=sys.stderr)
-            
-            # Start GLib main loop
-            self.loop = GLib.MainLoop()
-            self.loop.run()
-            
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            self.running = False
-            sys.exit(1)
+        attempt = 0
+        while self.running:
+            attempt += 1
+            try:
+                # Connect to D-Bus
+                self.system_bus = SystemBus()
+                self.session_bus = SessionBus()
+
+                # Monitor systemd-logind for suspend/resume and shutdown
+                login1 = self.system_bus.get('org.freedesktop.login1')
+                login1.PrepareForSleep.connect(self._on_prepare_for_sleep)
+                login1.PrepareForShutdown.connect(self._on_prepare_for_shutdown)
+                try:
+                    login1.SessionNew.connect(self._on_session_new)
+                    login1.SessionRemoved.connect(self._on_session_removed)
+                except Exception as e:
+                    print(f"Warning: Could not connect to session login events: {e}", file=sys.stderr)
+
+                # Monitor Gnome Screensaver
+                try:
+                    screensaver = self.session_bus.get('org.gnome.ScreenSaver')
+                    screensaver.ActiveChanged.connect(self._on_screensaver_active_changed)
+                except Exception as e:
+                    print(f"Warning: Could not connect to screensaver: {e}", file=sys.stderr)
+
+                # Monitor current session state changes
+                try:
+                    session_id = os.environ.get('XDG_SESSION_ID')
+                    if session_id:
+                        session_path = f'/org/freedesktop/login1/session/{session_id}'
+                        session = self.system_bus.get('org.freedesktop.login1', session_path)
+                        session.onPropertiesChanged = self._on_session_properties_changed
+                except Exception as e:
+                    print(f"Warning: Could not monitor session state: {e}", file=sys.stderr)
+
+                self._log_current_session_state()
+
+                # Log startup
+                self.logger.log_event('tracker', 'start', '')
+                print("Session activity tracker started", file=sys.stderr)
+
+                # Start GLib main loop
+                self.loop = GLib.MainLoop()
+                self.loop.run()
+                return
+
+            except Exception as e:
+                print(f"Warning: tracker startup failed, retrying: {e}", file=sys.stderr)
+                time.sleep(2)
+
+        self.running = False
+        sys.exit(1)
     
     def stop(self):
         """Stop monitoring and exit gracefully."""

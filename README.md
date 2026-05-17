@@ -82,6 +82,10 @@ mkdir -p ~/.config/systemd/user
 # Copy the service file
 cp timetrack.service ~/.config/systemd/user/
 
+# If you logged out while testing, re-enable/reload after updating the unit
+systemctl --user daemon-reload
+systemctl --user restart timetrack.service
+
 # Reload systemd
 systemctl --user daemon-reload
 
@@ -93,6 +97,8 @@ systemctl --user start timetrack.service
 ```
 
 ### 3. Verify it's running
+
+The service is configured to restart automatically, so it should come back after logout/login once your user manager is active again.
 
 ```bash
 # Check service status

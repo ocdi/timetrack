@@ -111,6 +111,14 @@ def overlap_seconds(start: datetime, end: datetime, other_start: datetime, other
     return (overlap_end - overlap_start).total_seconds()
 
 
+def details_value(details: str, key: str) -> Optional[str]:
+    for part in details.split(','):
+        part = part.strip()
+        if part.startswith(f"{key}="):
+            return part.split('=', 1)[1]
+    return None
+
+
 def build_sessions(
     events: List[ActivityEvent],
     as_of: datetime,
@@ -131,6 +139,7 @@ def build_sessions(
     screensaver_spans: List[Interval] = []
     current_source: str = "unknown"
     tracker_pending_stop: Optional[datetime] = None
+    current_session_id: Optional[str] = None
 
     def anchor() -> Optional[datetime]:
         return session_start
@@ -187,8 +196,11 @@ def build_sessions(
                 if session_start is not None:
                     close_session(event.timestamp)
                 start_session(event.timestamp, "session-active")
+                current_session_id = details_value(event.details, "session_id")
             elif event.event_subtype == "logout":
-                close_session(event.timestamp)
+                session_id = details_value(event.details, "session_id")
+                if current_session_id is None or session_id is None or session_id == current_session_id:
+                    close_session(event.timestamp)
         elif session_mode == "activate_deactivate" and event.event_type == "session":
             if event.event_subtype == "activate":
                 if session_start is None:
