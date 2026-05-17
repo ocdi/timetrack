@@ -9,6 +9,7 @@ import sys
 import signal
 import csv
 import threading
+import pwd
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -63,7 +64,32 @@ def _get_session_username(session) -> str:
                 return str(value)
         except Exception:
             continue
+
+    try:
+        user = getattr(session, 'User')
+        if user:
+            if isinstance(user, (tuple, list)) and len(user) > 1 and user[1]:
+                return str(user[1])
+            if hasattr(user, '__getitem__'):
+                candidate = user[1]
+                if candidate:
+                    return str(candidate)
+    except Exception:
+        pass
+
+    try:
+        return str(session.Get('org.freedesktop.login1.Session', 'Name'))
+    except Exception:
+        pass
+
     return ''
+
+
+def _get_current_username() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return os.environ.get('USER', '')
 
 
 def _session_details(session_id: str, session) -> str:
@@ -72,6 +98,18 @@ def _session_details(session_id: str, session) -> str:
     if username:
         details.append(f"user={username}")
     return ','.join(details)
+
+
+def _get_current_session(self_system_bus) -> Optional[tuple[str, object]]:
+    try:
+        login1 = self_system_bus.get('org.freedesktop.login1')
+        pid = os.getpid()
+        session_path = login1.GetSessionByPID(pid)
+        session_id = session_path.rsplit('/', 1)[-1]
+        session = self_system_bus.get('org.freedesktop.login1', session_path)
+        return session_id, session
+    except Exception:
+        return None
 
 
 class SessionActivityTracker:
@@ -147,19 +185,33 @@ class SessionActivityTracker:
     def _log_current_session_state(self):
         """Reconcile current logind session state at startup."""
         try:
-            session_id = os.environ.get('XDG_SESSION_ID')
-            if not session_id:
-                self.logger.log_event('session', 'logout', 'startup=no-session-id')
+            username = _get_current_username()
+            current = _get_current_session(self.system_bus)
+            if not current:
+                details = f"startup=true"
+                if username:
+                    details += f",user={username}"
+                self.logger.log_event('session', 'active', details)
                 return
 
-            session_path = f'/org/freedesktop/login1/session/{session_id}'
-            session = self.system_bus.get('org.freedesktop.login1', session_path)
+            session_id, session = current
             active = getattr(session, 'Active', None)
             if active:
-                self.logger.log_event('session', 'login', _session_details(session_id, session))
+                details = _session_details(session_id, session)
+                if username and 'user=' not in details:
+                    details += f",user={username}"
+                self.logger.log_event('session', 'active', details)
             else:
-                self.logger.log_event('session', 'logout', _session_details(session_id, session))
+                details = f"session_id={session_id},startup=true"
+                if username:
+                    details += f",user={username}"
+                self.logger.log_event('session', 'active', details)
         except Exception as e:
+            username = _get_current_username()
+            details = f"startup=true"
+            if username:
+                details += f",user={username}"
+            self.logger.log_event('session', 'active', details)
             print(f"Warning: Could not reconcile current session state: {e}", file=sys.stderr)
     
     def start(self):

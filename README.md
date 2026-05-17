@@ -5,7 +5,7 @@ A lightweight Python daemon that monitors and logs session activity events on Gn
 ## Features
 
 Tracks the following events:
-- **Login/logout**: GNOME session start and end, with username when available
+ - **Session active**: GNOME session is active at service start, with username when available
 - **Screensaver**: Activate/deactivate
 - **System**: Suspend/resume
 - **System**: Shutdown
@@ -39,6 +39,8 @@ Add `--debug` to print the parsed UTC events, their local-time conversions, and 
 ```bash
 python3 timetrack_report.py --debug
 ```
+
+Tracker-mode sessions treat short `tracker stop`/`tracker start` gaps as continuous. The default merge window is 5 minutes, and you can change it with `--tracker-restart-gap`.
 
 ## Local CSV Replay
 
@@ -126,7 +128,7 @@ libreoffice --calc ~/.local/share/timetrack/activity.csv
 The log file has the following columns:
 - **timestamp**: ISO 8601 format timestamp (UTC)
 - **event_type**: Type of event (session, screensaver, system, tracker)
-- **event_subtype**: Specific event (login, logout, activate, deactivate, suspend, resume, shutdown, start, stop)
+- **event_subtype**: Specific event (active, login, logout, activate, deactivate, suspend, resume, shutdown, start, stop)
 - **details**: Additional information such as `session_id=...` and `user=...`
 
 Example:

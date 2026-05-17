@@ -55,6 +55,7 @@ def default_log_file() -> Path:
 
 
 MAX_SESSION_HOURS = 18
+DEFAULT_TRACKER_RESTART_GAP = timedelta(minutes=5)
 
 
 def parse_path(value: str) -> Path:
@@ -110,9 +111,14 @@ def overlap_seconds(start: datetime, end: datetime, other_start: datetime, other
     return (overlap_end - overlap_start).total_seconds()
 
 
-def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[SessionReport]:
+def build_sessions(
+    events: List[ActivityEvent],
+    as_of: datetime,
+    tracker_restart_gap: timedelta = DEFAULT_TRACKER_RESTART_GAP,
+) -> List[SessionReport]:
+    has_login = any(event.event_type == "session" and event.event_subtype in {"login", "active"} for event in events)
     session_subtypes = {event.event_subtype for event in events if event.event_type == "session"}
-    if session_subtypes & {"login", "logout"}:
+    if has_login:
         session_mode = "login_logout"
     elif session_subtypes & {"activate", "deactivate"}:
         session_mode = "activate_deactivate"
@@ -124,22 +130,24 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
     screensaver_start: Optional[datetime] = None
     screensaver_spans: List[Interval] = []
     current_source: str = "unknown"
+    tracker_pending_stop: Optional[datetime] = None
 
     def anchor() -> Optional[datetime]:
         return session_start
 
     def start_session(start: datetime, source: str) -> None:
-        nonlocal session_start, screensaver_start, screensaver_spans, current_source
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop
         session_start = start
         current_source = source
         screensaver_start = None
         screensaver_spans = []
+        tracker_pending_stop = None
 
     def session_limit(start: datetime) -> datetime:
         return start + timedelta(hours=MAX_SESSION_HOURS)
 
     def close_session(end: datetime, capped: bool = False) -> None:
-        nonlocal session_start, screensaver_start, screensaver_spans, current_source
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop
 
         start = anchor()
         if start is None:
@@ -156,8 +164,18 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
         screensaver_start = None
         screensaver_spans = []
         current_source = "unknown"
+        tracker_pending_stop = None
+
+    def flush_pending_tracker_stop(before: datetime) -> None:
+        nonlocal tracker_pending_stop
+        if session_mode != "tracker" or tracker_pending_stop is None or session_start is None:
+            return
+        if before >= tracker_pending_stop + tracker_restart_gap:
+            close_session(tracker_pending_stop)
 
     for event in events:
+        flush_pending_tracker_stop(event.timestamp)
+
         current_anchor = anchor()
         if current_anchor is not None:
             limit = session_limit(current_anchor)
@@ -165,10 +183,10 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
                 close_session(limit, capped=True)
 
         if session_mode == "login_logout" and event.event_type == "session":
-            if event.event_subtype == "login":
+            if event.event_subtype in {"login", "active"}:
                 if session_start is not None:
                     close_session(event.timestamp)
-                start_session(event.timestamp, "session-login")
+                start_session(event.timestamp, "session-active")
             elif event.event_subtype == "logout":
                 close_session(event.timestamp)
         elif session_mode == "activate_deactivate" and event.event_type == "session":
@@ -181,8 +199,11 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
             if event.event_type == "tracker" and event.event_subtype == "start":
                 if session_start is None:
                     start_session(event.timestamp, "tracker")
+                elif tracker_pending_stop is not None and event.timestamp - tracker_pending_stop <= tracker_restart_gap:
+                    tracker_pending_stop = None
             elif event.event_type == "tracker" and event.event_subtype == "stop":
-                close_session(event.timestamp)
+                if session_start is not None:
+                    tracker_pending_stop = event.timestamp
         elif event.event_type == "screensaver" and anchor() is not None:
             if event.event_subtype == "activate":
                 if screensaver_start is None:
@@ -194,9 +215,15 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
 
     current_anchor = anchor()
     if current_anchor is not None:
-        limit = session_limit(current_anchor)
-        end = min(as_of, limit)
-        close_session(end, capped=end == limit and as_of > limit)
+        if session_mode == "tracker" and tracker_pending_stop is not None:
+            if as_of >= tracker_pending_stop + tracker_restart_gap:
+                close_session(tracker_pending_stop)
+            else:
+                close_session(as_of)
+        else:
+            limit = session_limit(current_anchor)
+            end = min(as_of, limit)
+            close_session(end, capped=end == limit and as_of > limit)
 
     return sessions
 
@@ -231,6 +258,10 @@ def debug_print_sessions(sessions: List[SessionReport]) -> None:
                 f"     screensaver {span_index}: {format_debug_timestamp(span.start)} -> {format_debug_timestamp(span.end)}",
                 file=sys.stderr,
             )
+
+
+def format_timedelta_minutes(value: timedelta) -> str:
+    return f"{int(value.total_seconds() // 60)}m"
 
 
 def split_session_by_midnight(session: SessionReport) -> List[Interval]:
@@ -352,6 +383,12 @@ def main() -> int:
         action="store_true",
         help="Print parsed events and derived sessions to stderr",
     )
+    parser.add_argument(
+        "--tracker-restart-gap",
+        type=int,
+        default=int(DEFAULT_TRACKER_RESTART_GAP.total_seconds() // 60),
+        help="Merge tracker stop/start gaps shorter than this many minutes",
+    )
     args = parser.parse_args()
 
     log_file = args.log_file.expanduser()
@@ -368,7 +405,11 @@ def main() -> int:
     if args.debug:
         debug_print_events(events)
 
-    sessions = build_sessions(events, datetime.now(timezone.utc))
+    restart_gap = timedelta(minutes=args.tracker_restart_gap)
+    if args.debug:
+        print(f"DEBUG tracker restart gap: {format_timedelta_minutes(restart_gap)}", file=sys.stderr)
+
+    sessions = build_sessions(events, datetime.now(timezone.utc), tracker_restart_gap=restart_gap)
     print_report(sessions, debug=args.debug)
     return 0
 
