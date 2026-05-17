@@ -5,6 +5,7 @@ A lightweight Python daemon that monitors and logs session activity events on Gn
 ## Features
 
 Tracks the following events:
+- **Login/logout**: GNOME session start and end, with username when available
 - **Screensaver**: Activate/deactivate
 - **System**: Suspend/resume
 - **System**: Shutdown
@@ -12,6 +13,46 @@ Tracks the following events:
 - **Tracker**: Start/stop (when the tracker itself starts or stops)
 
 All events are logged to a CSV file with timestamps for easy analysis.
+
+## Session Report
+
+To turn the activity log into a session report, run:
+
+```bash
+python3 timetrack_report.py
+```
+
+This reads `~/.local/share/timetrack/activity.csv`, converts the session timestamps to your system local time, and prints each session with its date, start time, end time, session length, screensaver time, and active hours.
+
+Screensaver time is excluded from active hours but does not end a session. Sessions are split at local midnight so overnight activity stays readable. Any session left open in the log is capped at 18 hours so a broken logout cannot inflate the report.
+
+You can also point it at another log file:
+
+```bash
+python3 timetrack_report.py --log-file /path/to/activity.csv
+```
+
+Add `--debug` to print the parsed UTC events, their local-time conversions, and the derived sessions to stderr:
+
+```bash
+python3 timetrack_report.py --debug
+```
+
+## Local CSV Replay
+
+To inspect the raw log in local time, run:
+
+```bash
+python3 timetrack_replay.py
+```
+
+This rewrites the `timestamp` column into local time and streams the CSV back out, which makes it easier to compare with the session report.
+
+You can write the replay to a file:
+
+```bash
+python3 timetrack_replay.py --output /tmp/activity-local.csv
+```
 
 ## Requirements
 
@@ -83,8 +124,8 @@ libreoffice --calc ~/.local/share/timetrack/activity.csv
 The log file has the following columns:
 - **timestamp**: ISO 8601 format timestamp (UTC)
 - **event_type**: Type of event (session, screensaver, system, tracker)
-- **event_subtype**: Specific event (activate, deactivate, suspend, resume, shutdown, start, stop)
-- **details**: Additional information (currently unused, reserved for future use)
+- **event_subtype**: Specific event (login, logout, activate, deactivate, suspend, resume, shutdown, start, stop)
+- **details**: Additional information such as `session_id=...` and `user=...`
 
 Example:
 ```csv
