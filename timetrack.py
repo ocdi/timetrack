@@ -55,6 +55,25 @@ class ActivityLogger:
                 print(f"Error writing to log: {e}", file=sys.stderr)
 
 
+def _get_session_username(session) -> str:
+    for attr in ('UserName', 'Name'):
+        try:
+            value = getattr(session, attr)
+            if value:
+                return str(value)
+        except Exception:
+            continue
+    return ''
+
+
+def _session_details(session_id: str, session) -> str:
+    details = [f"session_id={session_id}"]
+    username = _get_session_username(session)
+    if username:
+        details.append(f"user={username}")
+    return ','.join(details)
+
+
 class SessionActivityTracker:
     """Monitors session activity via D-Bus and logs events."""
     
@@ -105,6 +124,43 @@ class SessionActivityTracker:
                 self.logger.log_event('session', 'activate', '')
             else:
                 self.logger.log_event('session', 'deactivate', '')
+
+    def _on_session_new(self, session_id: str, session_path: str):
+        """Handle new logind sessions."""
+        try:
+            session = self.system_bus.get('org.freedesktop.login1', session_path)
+            username = _get_session_username(session)
+            details = f"session_id={session_id}"
+            if username:
+                details += f",user={username}"
+            self.logger.log_event('session', 'login', details)
+        except Exception as e:
+            print(f"Warning: Could not log new session {session_id}: {e}", file=sys.stderr)
+
+    def _on_session_removed(self, session_id: str, session_path: str):
+        """Handle removed logind sessions."""
+        try:
+            self.logger.log_event('session', 'logout', f"session_id={session_id}")
+        except Exception as e:
+            print(f"Warning: Could not log removed session {session_id}: {e}", file=sys.stderr)
+
+    def _log_current_session_state(self):
+        """Reconcile current logind session state at startup."""
+        try:
+            session_id = os.environ.get('XDG_SESSION_ID')
+            if not session_id:
+                self.logger.log_event('session', 'logout', 'startup=no-session-id')
+                return
+
+            session_path = f'/org/freedesktop/login1/session/{session_id}'
+            session = self.system_bus.get('org.freedesktop.login1', session_path)
+            active = getattr(session, 'Active', None)
+            if active:
+                self.logger.log_event('session', 'login', _session_details(session_id, session))
+            else:
+                self.logger.log_event('session', 'logout', _session_details(session_id, session))
+        except Exception as e:
+            print(f"Warning: Could not reconcile current session state: {e}", file=sys.stderr)
     
     def start(self):
         """Start monitoring session activity."""
@@ -119,6 +175,11 @@ class SessionActivityTracker:
             login1 = self.system_bus.get('org.freedesktop.login1')
             login1.PrepareForSleep.connect(self._on_prepare_for_sleep)
             login1.PrepareForShutdown.connect(self._on_prepare_for_shutdown)
+            try:
+                login1.SessionNew.connect(self._on_session_new)
+                login1.SessionRemoved.connect(self._on_session_removed)
+            except Exception as e:
+                print(f"Warning: Could not connect to session login events: {e}", file=sys.stderr)
             
             # Monitor Gnome Screensaver
             try:
@@ -127,9 +188,8 @@ class SessionActivityTracker:
             except Exception as e:
                 print(f"Warning: Could not connect to screensaver: {e}", file=sys.stderr)
             
-            # Monitor session state changes
+            # Monitor current session state changes
             try:
-                # Get the current session ID
                 session_id = os.environ.get('XDG_SESSION_ID')
                 if session_id:
                     session_path = f'/org/freedesktop/login1/session/{session_id}'
@@ -137,6 +197,8 @@ class SessionActivityTracker:
                     session.onPropertiesChanged = self._on_session_properties_changed
             except Exception as e:
                 print(f"Warning: Could not monitor session state: {e}", file=sys.stderr)
+
+            self._log_current_session_state()
             
             # Log startup
             self.logger.log_event('tracker', 'start', '')

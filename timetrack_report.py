@@ -15,6 +15,7 @@ class ActivityEvent:
     timestamp: datetime
     event_type: str
     event_subtype: str
+    details: str
     row_number: int
 
 
@@ -83,6 +84,7 @@ def load_events(log_file: Path) -> List[ActivityEvent]:
             timestamp_raw = (row.get("timestamp") or "").strip()
             event_type = (row.get("event_type") or "").strip()
             event_subtype = (row.get("event_subtype") or "").strip()
+            details = (row.get("details") or "").strip()
 
             if not timestamp_raw or not event_type or not event_subtype:
                 print(f"Warning: skipping malformed row {row_number}", file=sys.stderr)
@@ -94,7 +96,7 @@ def load_events(log_file: Path) -> List[ActivityEvent]:
                 print(f"Warning: skipping row {row_number}: {exc}", file=sys.stderr)
                 continue
 
-            events.append(ActivityEvent(timestamp, event_type, event_subtype, row_number))
+            events.append(ActivityEvent(timestamp, event_type, event_subtype, details, row_number))
 
     events.sort(key=lambda event: (event.timestamp, event.row_number))
     return events
@@ -109,30 +111,37 @@ def overlap_seconds(start: datetime, end: datetime, other_start: datetime, other
 
 
 def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[SessionReport]:
+    session_subtypes = {event.event_subtype for event in events if event.event_type == "session"}
+    if session_subtypes & {"login", "logout"}:
+        session_mode = "login_logout"
+    elif session_subtypes & {"activate", "deactivate"}:
+        session_mode = "activate_deactivate"
+    else:
+        session_mode = "tracker"
+
     sessions: List[SessionReport] = []
     session_start: Optional[datetime] = None
-    tracker_start: Optional[datetime] = None
     screensaver_start: Optional[datetime] = None
     screensaver_spans: List[Interval] = []
+    current_source: str = "unknown"
 
     def anchor() -> Optional[datetime]:
-        return session_start or tracker_start
+        return session_start
 
-    def anchor_source() -> Optional[str]:
-        if session_start is not None:
-            return "session"
-        if tracker_start is not None:
-            return "tracker"
-        return None
+    def start_session(start: datetime, source: str) -> None:
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source
+        session_start = start
+        current_source = source
+        screensaver_start = None
+        screensaver_spans = []
 
     def session_limit(start: datetime) -> datetime:
         return start + timedelta(hours=MAX_SESSION_HOURS)
 
     def close_session(end: datetime, capped: bool = False) -> None:
-        nonlocal session_start, tracker_start, screensaver_start, screensaver_spans
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source
 
         start = anchor()
-        source = anchor_source()
         if start is None:
             return
 
@@ -141,12 +150,12 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
                 screensaver_spans.append(Interval(screensaver_start, end))
                 screensaver_start = None
 
-            sessions.append(SessionReport(start, end, list(screensaver_spans), source or "unknown", capped=capped))
+            sessions.append(SessionReport(start, end, list(screensaver_spans), current_source, capped=capped))
 
         session_start = None
-        tracker_start = None
         screensaver_start = None
         screensaver_spans = []
+        current_source = "unknown"
 
     for event in events:
         current_anchor = anchor()
@@ -155,19 +164,24 @@ def build_sessions(events: List[ActivityEvent], as_of: datetime) -> List[Session
             if event.timestamp >= limit:
                 close_session(limit, capped=True)
 
-        if event.event_type == "tracker" and event.event_subtype == "start":
-            if session_start is None and tracker_start is None:
-                tracker_start = event.timestamp
-        elif event.event_type == "tracker" and event.event_subtype == "stop":
-            close_session(event.timestamp)
-        elif event.event_type == "session":
+        if session_mode == "login_logout" and event.event_type == "session":
+            if event.event_subtype == "login":
+                if session_start is not None:
+                    close_session(event.timestamp)
+                start_session(event.timestamp, "session-login")
+            elif event.event_subtype == "logout":
+                close_session(event.timestamp)
+        elif session_mode == "activate_deactivate" and event.event_type == "session":
             if event.event_subtype == "activate":
                 if session_start is None:
-                    session_start = event.timestamp
-                    tracker_start = None
-                    screensaver_start = None
-                    screensaver_spans = []
+                    start_session(event.timestamp, "session")
             elif event.event_subtype == "deactivate":
+                close_session(event.timestamp)
+        elif session_mode == "tracker":
+            if event.event_type == "tracker" and event.event_subtype == "start":
+                if session_start is None:
+                    start_session(event.timestamp, "tracker")
+            elif event.event_type == "tracker" and event.event_subtype == "stop":
                 close_session(event.timestamp)
         elif event.event_type == "screensaver" and anchor() is not None:
             if event.event_subtype == "activate":
