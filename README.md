@@ -14,6 +14,8 @@ Tracks the following events:
 
 All events are logged to a CSV file with timestamps for easy analysis.
 
+On startup the tracker also reconciles the current logind session state, so a service restart will emit a login/logout record for the active session if one exists.
+
 ## Session Report
 
 To turn the activity log into a session report, run:
