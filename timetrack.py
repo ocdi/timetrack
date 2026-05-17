@@ -101,14 +101,41 @@ def _session_details(session_id: str, session) -> str:
     return ','.join(details)
 
 
-def _get_current_session(self_system_bus) -> Optional[tuple[str, object]]:
+def _get_current_session(self_system_bus, username: str = '') -> Optional[tuple[str, object]]:
     try:
         login1 = self_system_bus.get('org.freedesktop.login1')
         pid = os.getpid()
-        session_path = login1.GetSessionByPID(pid)
-        session_id = session_path.rsplit('/', 1)[-1]
-        session = self_system_bus.get('org.freedesktop.login1', session_path)
-        return session_id, session
+        try:
+            session_path = login1.GetSessionByPID(pid)
+            session_id = session_path.rsplit('/', 1)[-1]
+            session = self_system_bus.get('org.freedesktop.login1', session_path)
+            return session_id, session
+        except Exception:
+            pass
+
+        uid = os.getuid()
+        sessions = login1.ListSessions()
+        fallback = None
+        for entry in sessions:
+            if len(entry) < 5:
+                continue
+
+            session_id, session_uid, session_user, _seat_id, session_path = entry[:5]
+            if session_uid != uid:
+                continue
+            if username and session_user and str(session_user) != username:
+                continue
+
+            session = self_system_bus.get('org.freedesktop.login1', session_path)
+            if getattr(session, 'Active', False):
+                return session_id, session
+            if fallback is None:
+                fallback = (session_id, session)
+
+        if fallback is not None:
+            return fallback
+
+        return None
     except Exception:
         return None
 
@@ -197,7 +224,7 @@ class SessionActivityTracker:
         """Reconcile current logind session state at startup."""
         try:
             username = _get_current_username()
-            current = _get_current_session(self.system_bus)
+            current = _get_current_session(self.system_bus, username)
             if not current:
                 details = f"startup=true"
                 if username:
