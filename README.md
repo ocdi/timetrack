@@ -24,7 +24,9 @@ To turn the activity log into a session report, run:
 python3 timetrack_report.py
 ```
 
-This reads `~/.local/share/timetrack/activity.csv`, converts the session timestamps to your system local time, and prints each session with its date, start time, end time, session length, screensaver time, and active hours.
+This reads `~/.local/share/timetrack/activity.csv`, converts the session timestamps to your system local time, and prints each session with its date, start time, active hours, end time, session length, and screensaver time.
+
+The report matches session starts and stops by `session_id` so startup `active` markers do not split the same session into duplicates.
 
 Screensaver time is excluded from active hours but does not end a session. Sessions are split at local midnight so overnight activity stays readable. Any session left open in the log is capped at 18 hours so a broken logout cannot inflate the report.
 

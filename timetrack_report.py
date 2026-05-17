@@ -132,15 +132,6 @@ def build_sessions(
     as_of: datetime,
     tracker_restart_gap: timedelta = DEFAULT_TRACKER_RESTART_GAP,
 ) -> List[SessionReport]:
-    has_login = any(event.event_type == "session" and event.event_subtype in {"login", "active"} for event in events)
-    session_subtypes = {event.event_subtype for event in events if event.event_type == "session"}
-    if has_login:
-        session_mode = "login_logout"
-    elif session_subtypes & {"activate", "deactivate"}:
-        session_mode = "activate_deactivate"
-    else:
-        session_mode = "tracker"
-
     sessions: List[SessionReport] = []
     session_start: Optional[datetime] = None
     screensaver_start: Optional[datetime] = None
@@ -164,7 +155,7 @@ def build_sessions(
         return start + timedelta(hours=MAX_SESSION_HOURS)
 
     def close_session(end: datetime, capped: bool = False) -> None:
-        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop, current_session_id
 
         start = anchor()
         if start is None:
@@ -182,10 +173,11 @@ def build_sessions(
         screensaver_spans = []
         current_source = "unknown"
         tracker_pending_stop = None
+        current_session_id = None
 
     def flush_pending_tracker_stop(before: datetime) -> None:
         nonlocal tracker_pending_stop
-        if session_mode != "tracker" or tracker_pending_stop is None or session_start is None:
+        if tracker_pending_stop is None or session_start is None:
             return
         if before >= tracker_pending_stop + tracker_restart_gap:
             close_session(tracker_pending_stop)
@@ -199,32 +191,36 @@ def build_sessions(
             if event.timestamp >= limit:
                 close_session(limit, capped=True)
 
-        if session_mode == "login_logout" and event.event_type == "session":
-            if event.event_subtype in {"login", "active"}:
-                if session_start is not None:
-                    close_session(event.timestamp)
-                start_session(event.timestamp, "session-active")
-                current_session_id = event_session_id(event)
-            elif event.event_subtype == "logout":
-                session_id = event_session_id(event)
-                if current_session_id is None or session_id is None or session_id == current_session_id:
-                    close_session(event.timestamp)
-        elif session_mode == "activate_deactivate" and event.event_type == "session":
-            if event.event_subtype == "activate":
+        if event.event_type == "session":
+            session_id = event_session_id(event)
+
+            if event.event_subtype in {"login", "active", "activate"}:
                 if session_start is None:
-                    start_session(event.timestamp, "session")
-            elif event.event_subtype == "deactivate":
-                close_session(event.timestamp)
-        elif session_mode == "tracker":
-            if event.event_type == "tracker" and event.event_subtype == "start":
-                if session_start is None:
-                    start_session(event.timestamp, "tracker")
-                elif tracker_pending_stop is not None and event.timestamp - tracker_pending_stop <= tracker_restart_gap:
+                    start_session(event.timestamp, "session-active" if event.event_subtype in {"login", "active"} else "session")
+                    current_session_id = session_id
+                elif session_id is not None and current_session_id is not None and session_id != current_session_id:
+                    close_session(event.timestamp)
+                    start_session(event.timestamp, "session-active")
+                    current_session_id = session_id
+                elif session_id is not None and current_session_id is None:
+                    current_session_id = session_id
+            elif event.event_subtype in {"logout", "deactivate"}:
+                if session_start is not None and (current_session_id is None or session_id is None or session_id == current_session_id):
+                    close_session(event.timestamp)
+            continue
+
+        if event.event_type == "tracker":
+            if event.event_subtype == "start":
+                if tracker_pending_stop is not None and event.timestamp - tracker_pending_stop <= tracker_restart_gap:
                     tracker_pending_stop = None
-            elif event.event_type == "tracker" and event.event_subtype == "stop":
+                elif session_start is None and current_source == "unknown":
+                    start_session(event.timestamp, "tracker")
+            elif event.event_subtype == "stop":
                 if session_start is not None:
                     tracker_pending_stop = event.timestamp
-        elif event.event_type == "screensaver" and anchor() is not None:
+            continue
+
+        if event.event_type == "screensaver" and anchor() is not None:
             if event.event_subtype == "activate":
                 if screensaver_start is None:
                     screensaver_start = event.timestamp
@@ -235,11 +231,8 @@ def build_sessions(
 
     current_anchor = anchor()
     if current_anchor is not None:
-        if session_mode == "tracker" and tracker_pending_stop is not None:
-            if as_of >= tracker_pending_stop + tracker_restart_gap:
-                close_session(tracker_pending_stop)
-            else:
-                close_session(as_of)
+        if tracker_pending_stop is not None and as_of >= tracker_pending_stop + tracker_restart_gap:
+            close_session(tracker_pending_stop)
         else:
             limit = session_limit(current_anchor)
             end = min(as_of, limit)
@@ -340,15 +333,15 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
                 [
                     format_local_date(start_local),
                     format_local_time(start_local),
+                    f"{active_hours:.2f}",
                     format_local_time(end_local),
                     f"{session_hours:.2f}",
                     f"{screensaver_hours:.2f}",
-                    f"{active_hours:.2f}",
                     "yes" if capped else "",
                 ]
             )
 
-    headers = ["Date", "Start", "End", "Duration", "Screensaver", "Active", "Capped"]
+    headers = ["Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
     widths = [len(header) for header in headers]
     for row in rows:
         for index, value in enumerate(row):
