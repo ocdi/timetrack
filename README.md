@@ -64,6 +64,8 @@ python3 timetrack_replay.py
 
 This rewrites the `timestamp` column into local time and streams the CSV back out, which makes it easier to compare with the session report.
 
+It ignores any stray unnamed columns in the source CSV so malformed rows won’t break the replay.
+
 You can write the replay to a file:
 
 ```bash

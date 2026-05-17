@@ -33,11 +33,12 @@ def replay(log_file: Path, output_file) -> int:
         if reader.fieldnames is None:
             raise ValueError("CSV log is missing a header row")
 
-        fieldnames = list(reader.fieldnames)
+        fieldnames = [field for field in reader.fieldnames if field]
         writer = csv.DictWriter(output_file, fieldnames=fieldnames)
         writer.writeheader()
 
         for row_number, row in enumerate(reader, start=2):
+            row = {key: value for key, value in row.items() if key in fieldnames}
             timestamp_raw = (row.get("timestamp") or "").strip()
             if timestamp_raw:
                 try:
