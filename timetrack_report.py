@@ -15,6 +15,7 @@ class ActivityEvent:
     timestamp: datetime
     event_type: str
     event_subtype: str
+    session_id: str
     details: str
     row_number: int
 
@@ -85,6 +86,7 @@ def load_events(log_file: Path) -> List[ActivityEvent]:
             timestamp_raw = (row.get("timestamp") or "").strip()
             event_type = (row.get("event_type") or "").strip()
             event_subtype = (row.get("event_subtype") or "").strip()
+            session_id = (row.get("session_id") or "").strip()
             details = (row.get("details") or "").strip()
 
             if not timestamp_raw or not event_type or not event_subtype:
@@ -97,7 +99,7 @@ def load_events(log_file: Path) -> List[ActivityEvent]:
                 print(f"Warning: skipping row {row_number}: {exc}", file=sys.stderr)
                 continue
 
-            events.append(ActivityEvent(timestamp, event_type, event_subtype, details, row_number))
+            events.append(ActivityEvent(timestamp, event_type, event_subtype, session_id, details, row_number))
 
     events.sort(key=lambda event: (event.timestamp, event.row_number))
     return events
@@ -117,6 +119,12 @@ def details_value(details: str, key: str) -> Optional[str]:
         if part.startswith(f"{key}="):
             return part.split('=', 1)[1]
     return None
+
+
+def event_session_id(event: ActivityEvent) -> Optional[str]:
+    if event.session_id:
+        return event.session_id
+    return details_value(event.details, "session_id")
 
 
 def build_sessions(
@@ -196,9 +204,9 @@ def build_sessions(
                 if session_start is not None:
                     close_session(event.timestamp)
                 start_session(event.timestamp, "session-active")
-                current_session_id = details_value(event.details, "session_id")
+                current_session_id = event_session_id(event)
             elif event.event_subtype == "logout":
-                session_id = details_value(event.details, "session_id")
+                session_id = event_session_id(event)
                 if current_session_id is None or session_id is None or session_id == current_session_id:
                     close_session(event.timestamp)
         elif session_mode == "activate_deactivate" and event.event_type == "session":

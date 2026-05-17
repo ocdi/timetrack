@@ -135,6 +135,7 @@ The log file has the following columns:
 - **timestamp**: ISO 8601 format timestamp (UTC)
 - **event_type**: Type of event (session, screensaver, system, tracker)
 - **event_subtype**: Specific event (active, login, logout, activate, deactivate, suspend, resume, shutdown, start, stop)
+- **session_id**: logind session id when available
 - **details**: Additional information such as `session_id=...` and `user=...`
 
 Example:

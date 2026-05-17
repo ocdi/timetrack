@@ -42,9 +42,9 @@ class ActivityLogger:
         if not self.log_file.exists():
             with open(self.log_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['timestamp', 'event_type', 'event_subtype', 'details'])
-    
-    def log_event(self, event_type: str, event_subtype: str, details: str = ''):
+                writer.writerow(['timestamp', 'event_type', 'event_subtype', 'session_id', 'details'])
+
+    def log_event(self, event_type: str, event_subtype: str, session_id: str = '', details: str = ''):
         """Log an event to the CSV file."""
         timestamp = datetime.now(timezone.utc).isoformat()
         
@@ -52,7 +52,7 @@ class ActivityLogger:
             try:
                 with open(self.log_file, 'a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([timestamp, event_type, event_subtype, details])
+                    writer.writerow([timestamp, event_type, event_subtype, session_id, details])
             except Exception as e:
                 print(f"Error writing to log: {e}", file=sys.stderr)
 
@@ -94,7 +94,7 @@ def _get_current_username() -> str:
 
 
 def _session_details(session_id: str, session) -> str:
-    details = [f"session_id={session_id}"]
+    details = []
     username = _get_session_username(session)
     if username:
         details.append(f"user={username}")
@@ -141,30 +141,32 @@ class SessionActivityTracker:
     def _on_prepare_for_sleep(self, sleeping: bool):
         """Handle system suspend/resume events."""
         if sleeping:
-            self.logger.log_event('system', 'suspend', '')
+            self.logger.log_event('system', 'suspend', self.current_session_id or '', '')
         else:
-            self.logger.log_event('system', 'resume', '')
+            self.logger.log_event('system', 'resume', self.current_session_id or '', '')
     
     def _on_prepare_for_shutdown(self, shutting_down: bool):
         """Handle system shutdown events."""
         if shutting_down:
-            self.logger.log_event('system', 'shutdown', '')
+            self.logger.log_event('system', 'shutdown', self.current_session_id or '', '')
     
     def _on_screensaver_active_changed(self, active: bool):
         """Handle screensaver activate/deactivate events."""
         if active:
-            self.logger.log_event('screensaver', 'activate', '')
+            self.logger.log_event('screensaver', 'activate', self.current_session_id or '', '')
         else:
-            self.logger.log_event('screensaver', 'deactivate', '')
+            self.logger.log_event('screensaver', 'deactivate', self.current_session_id or '', '')
     
     def _on_session_properties_changed(self, interface, changed, invalidated):
         """Handle session property changes (for session state tracking)."""
         if 'Active' in changed:
             active = changed['Active']
             if active:
-                self.logger.log_event('session', 'activate', '')
+                session_id = self.current_session_id or ''
+                self.logger.log_event('session', 'activate', session_id, '')
             else:
-                self.logger.log_event('session', 'deactivate', '')
+                session_id = self.current_session_id or ''
+                self.logger.log_event('session', 'deactivate', session_id, '')
 
     def _on_session_new(self, session_id: str, session_path: str):
         """Handle new logind sessions."""
@@ -176,7 +178,7 @@ class SessionActivityTracker:
             details = f"session_id={session_id}"
             if username:
                 details += f",user={username}"
-            self.logger.log_event('session', 'login', details)
+            self.logger.log_event('session', 'login', session_id, details)
             self.current_session_id = session_id
         except Exception as e:
             print(f"Warning: Could not log new session {session_id}: {e}", file=sys.stderr)
@@ -186,7 +188,7 @@ class SessionActivityTracker:
         try:
             if self.current_session_id and session_id != self.current_session_id:
                 return
-            self.logger.log_event('session', 'logout', f"session_id={session_id}")
+            self.logger.log_event('session', 'logout', session_id, '')
             self.current_session_id = None
         except Exception as e:
             print(f"Warning: Could not log removed session {session_id}: {e}", file=sys.stderr)
@@ -200,7 +202,7 @@ class SessionActivityTracker:
                 details = f"startup=true"
                 if username:
                     details += f",user={username}"
-                self.logger.log_event('session', 'active', details)
+                self.logger.log_event('session', 'active', '', details)
                 return
 
             session_id, session = current
@@ -211,19 +213,19 @@ class SessionActivityTracker:
                 details = _session_details(session_id, session)
                 if username and 'user=' not in details:
                     details += f",user={username}"
-                self.logger.log_event('session', 'active', details)
+                self.logger.log_event('session', 'active', session_id, details)
             else:
                 details = f"session_id={session_id},startup=true"
                 if username:
                     details += f",user={username}"
-                self.logger.log_event('session', 'active', details)
+                self.logger.log_event('session', 'active', session_id, details)
                 self.current_session_id = session_id
         except Exception as e:
             username = _get_current_username()
             details = f"startup=true"
             if username:
                 details += f",user={username}"
-            self.logger.log_event('session', 'active', details)
+            self.logger.log_event('session', 'active', self.current_session_id or '', details)
             print(f"Warning: Could not reconcile current session state: {e}", file=sys.stderr)
     
     def start(self):
@@ -268,7 +270,7 @@ class SessionActivityTracker:
                 self._log_current_session_state()
 
                 # Log startup
-                self.logger.log_event('tracker', 'start', '')
+                self.logger.log_event('tracker', 'start', self.current_session_id or '', '')
                 print("Session activity tracker started", file=sys.stderr)
 
                 # Start GLib main loop
@@ -287,7 +289,7 @@ class SessionActivityTracker:
         """Stop monitoring and exit gracefully."""
         if self.running:
             self.running = False
-            self.logger.log_event('tracker', 'stop', '')
+            self.logger.log_event('tracker', 'stop', self.current_session_id or '', '')
             if self.loop:
                 self.loop.quit()
 
