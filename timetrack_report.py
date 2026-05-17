@@ -362,6 +362,10 @@ def format_local_date(timestamp: datetime) -> str:
     return timestamp.astimezone().strftime("%Y-%m-%d")
 
 
+def format_local_weekday(timestamp: datetime) -> str:
+    return timestamp.astimezone().strftime("%a")
+
+
 def format_local_time(timestamp: datetime) -> str:
     return timestamp.astimezone().strftime("%H:%M:%S")
 
@@ -388,6 +392,7 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
             capped = session.capped and segment.end == session.end
             rows.append(
                 [
+                    format_local_weekday(start_local),
                     format_local_date(start_local),
                     format_local_time(start_local),
                     f"{active_hours:.2f}",
@@ -398,7 +403,7 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
                 ]
             )
 
-    headers = ["Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
+    headers = ["Day", "Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
     widths = [len(header) for header in headers]
     for row in rows:
         for index, value in enumerate(row):
@@ -411,7 +416,8 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
         f"{headers[3]:>{widths[3]}}  "
         f"{headers[4]:>{widths[4]}}  "
         f"{headers[5]:>{widths[5]}}  "
-        f"{headers[6]:<{widths[6]}}"
+        f"{headers[6]:>{widths[6]}}  "
+        f"{headers[7]:<{widths[7]}}"
     )
     separator_line = (
         f"{'-' * widths[0]:<{widths[0]}}  "
@@ -420,7 +426,8 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
         f"{'-' * widths[3]:>{widths[3]}}  "
         f"{'-' * widths[4]:>{widths[4]}}  "
         f"{'-' * widths[5]:>{widths[5]}}  "
-        f"{'-' * widths[6]:<{widths[6]}}"
+        f"{'-' * widths[6]:>{widths[6]}}  "
+        f"{'-' * widths[7]:<{widths[7]}}"
     )
 
     print(header_line)
@@ -433,7 +440,8 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
             f"{row[3]:>{widths[3]}}  "
             f"{row[4]:>{widths[4]}}  "
             f"{row[5]:>{widths[5]}}  "
-            f"{row[6]:<{widths[6]}}"
+            f"{row[6]:>{widths[6]}}  "
+            f"{row[7]:<{widths[7]}}"
         )
 
     print()
@@ -442,7 +450,7 @@ def print_report(sessions: List[SessionReport], debug: bool = False) -> None:
 
 def write_report_csv(sessions: List[SessionReport], output_file) -> None:
     writer = csv.writer(output_file)
-    headers = ["Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
+    headers = ["Day", "Date", "Start", "Active", "End", "Duration", "Screensaver", "Capped"]
     writer.writerow(headers)
 
     for session in sessions:
@@ -455,6 +463,7 @@ def write_report_csv(sessions: List[SessionReport], output_file) -> None:
             capped = session.capped and segment.end == session.end
             writer.writerow(
                 [
+                    format_local_weekday(start_local),
                     format_local_date(start_local),
                     format_local_time(start_local),
                     f"{active_hours:.2f}",
