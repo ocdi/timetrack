@@ -57,6 +57,8 @@ def default_log_file() -> Path:
 
 MAX_SESSION_HOURS = 18
 DEFAULT_TRACKER_RESTART_GAP = timedelta(minutes=5)
+DEFAULT_STRAY_TRACKER_START_GAP = timedelta(hours=4)
+DEFAULT_SESSION_MERGE_GAP = timedelta(minutes=5)
 
 
 def parse_path(value: str) -> Path:
@@ -127,10 +129,33 @@ def event_session_id(event: ActivityEvent) -> Optional[str]:
     return details_value(event.details, "session_id")
 
 
+def merge_sessions(sessions: List[SessionReport], merge_gap: timedelta) -> List[SessionReport]:
+    if not sessions:
+        return []
+
+    merged: List[SessionReport] = [sessions[0]]
+    for session in sessions[1:]:
+        previous = merged[-1]
+        gap = session.start - previous.end
+        if gap <= merge_gap:
+            merged[-1] = SessionReport(
+                previous.start,
+                session.end,
+                previous.screensaver_spans + session.screensaver_spans,
+                previous.source,
+                capped=previous.capped or session.capped,
+            )
+        else:
+            merged.append(session)
+
+    return merged
+
+
 def build_sessions(
     events: List[ActivityEvent],
     as_of: datetime,
     tracker_restart_gap: timedelta = DEFAULT_TRACKER_RESTART_GAP,
+    session_merge_gap: timedelta = DEFAULT_SESSION_MERGE_GAP,
 ) -> List[SessionReport]:
     sessions: List[SessionReport] = []
     session_start: Optional[datetime] = None
@@ -209,6 +234,11 @@ def build_sessions(
                     close_session(event.timestamp)
             continue
 
+        if event.event_type == "system" and event.event_subtype == "suspend":
+            if session_start is not None:
+                close_session(event.timestamp)
+            continue
+
         if event.event_type == "tracker":
             if event.event_subtype == "start":
                 if tracker_pending_stop is not None and event.timestamp - tracker_pending_stop <= tracker_restart_gap:
@@ -238,7 +268,7 @@ def build_sessions(
             end = min(as_of, limit)
             close_session(end, capped=end == limit and as_of > limit)
 
-    return sessions
+    return merge_sessions(sessions, session_merge_gap)
 
 
 def format_debug_timestamp(timestamp: datetime) -> str:
@@ -254,6 +284,33 @@ def debug_print_events(events: List[ActivityEvent]) -> None:
             f"{event.event_type}/{event.event_subtype}",
             file=sys.stderr,
         )
+
+
+def debug_print_tracker_start_anomalies(
+    events: List[ActivityEvent],
+    stray_gap: timedelta = DEFAULT_STRAY_TRACKER_START_GAP,
+) -> None:
+    last_tracker_start: Optional[ActivityEvent] = None
+
+    for event in events:
+        if event.event_type != "tracker":
+            continue
+
+        if event.event_subtype == "start":
+            if last_tracker_start is not None:
+                gap = event.timestamp - last_tracker_start.timestamp
+                if gap >= stray_gap:
+                    print(
+                        "WARNING: possible stray tracker/start detected "
+                        f"at row {last_tracker_start.row_number}. Another tracker/start appears "
+                        f"{gap} later at row {event.row_number} with no tracker/stop between. "
+                        f"If the earlier start was caused by an accidental wake, remove row {last_tracker_start.row_number} "
+                        "from activity.csv while timetrack is stopped.",
+                        file=sys.stderr,
+                    )
+            last_tracker_start = event
+        elif event.event_subtype == "stop":
+            last_tracker_start = None
 
 
 def debug_print_sessions(sessions: List[SessionReport]) -> None:
@@ -402,6 +459,12 @@ def main() -> int:
         default=int(DEFAULT_TRACKER_RESTART_GAP.total_seconds() // 60),
         help="Merge tracker stop/start gaps shorter than this many minutes",
     )
+    parser.add_argument(
+        "--session-merge-gap",
+        type=int,
+        default=int(DEFAULT_SESSION_MERGE_GAP.total_seconds() // 60),
+        help="Merge adjacent sessions with gaps shorter than this many minutes",
+    )
     args = parser.parse_args()
 
     log_file = args.log_file.expanduser()
@@ -419,10 +482,26 @@ def main() -> int:
         debug_print_events(events)
 
     restart_gap = timedelta(minutes=args.tracker_restart_gap)
+    session_merge_gap = timedelta(minutes=args.session_merge_gap)
     if args.debug:
         print(f"DEBUG tracker restart gap: {format_timedelta_minutes(restart_gap)}", file=sys.stderr)
+        print(
+            f"DEBUG session merge gap: {format_timedelta_minutes(session_merge_gap)}",
+            file=sys.stderr,
+        )
+        print(
+            f"DEBUG stray tracker/start gap: {format_timedelta_minutes(DEFAULT_STRAY_TRACKER_START_GAP)}",
+            file=sys.stderr,
+        )
 
-    sessions = build_sessions(events, datetime.now(timezone.utc), tracker_restart_gap=restart_gap)
+    sessions = build_sessions(
+        events,
+        datetime.now(timezone.utc),
+        tracker_restart_gap=restart_gap,
+        session_merge_gap=session_merge_gap,
+    )
+    if args.debug:
+        debug_print_tracker_start_anomalies(events)
     print_report(sessions, debug=args.debug)
     return 0
 

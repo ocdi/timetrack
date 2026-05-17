@@ -44,6 +44,10 @@ python3 timetrack_report.py --debug
 
 Tracker-mode sessions treat short `tracker stop`/`tracker start` gaps as continuous. The default merge window is 5 minutes, and you can change it with `--tracker-restart-gap`.
 
+Adjacent report sessions with short gaps are also merged by default using the same 5 minute window. Use `--session-merge-gap` to change it.
+
+Debug mode also warns about suspicious `tracker/start` rows separated by a long gap with no `tracker/stop` in between, and suggests which earlier row to remove if it looks like a bad wake-up event.
+
 ## Local CSV Replay
 
 To inspect the raw log in local time, run:
