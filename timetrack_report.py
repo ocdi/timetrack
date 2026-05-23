@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -59,6 +60,16 @@ MAX_SESSION_HOURS = 18
 DEFAULT_TRACKER_RESTART_GAP = timedelta(minutes=5)
 DEFAULT_STRAY_TRACKER_START_GAP = timedelta(hours=4)
 DEFAULT_SESSION_MERGE_GAP = timedelta(minutes=5)
+DEFAULT_LONG_SCREENSAVER_GAP = timedelta(minutes=30)
+
+ANSI_RESET = "\033[0m"
+ANSI_DIM = "\033[2m"
+ANSI_BLUE = "\033[34m"
+ANSI_CYAN = "\033[36m"
+ANSI_GREEN = "\033[32m"
+ANSI_MAGENTA = "\033[35m"
+ANSI_RED = "\033[31m"
+ANSI_YELLOW = "\033[33m"
 
 
 def parse_path(value: str) -> Path:
@@ -90,6 +101,11 @@ def load_events(log_file: Path) -> List[ActivityEvent]:
             event_subtype = (row.get("event_subtype") or "").strip()
             session_id = (row.get("session_id") or "").strip()
             details = (row.get("details") or "").strip()
+
+            extras = row.get(None) or []
+            if "session_id" not in reader.fieldnames and extras:
+                session_id = details
+                details = (extras[0] or "").strip()
 
             if not timestamp_raw or not event_type or not event_subtype:
                 print(f"Warning: skipping malformed row {row_number}", file=sys.stderr)
@@ -156,6 +172,7 @@ def build_sessions(
     as_of: datetime,
     tracker_restart_gap: timedelta = DEFAULT_TRACKER_RESTART_GAP,
     session_merge_gap: timedelta = DEFAULT_SESSION_MERGE_GAP,
+    long_screensaver_gap: timedelta = DEFAULT_LONG_SCREENSAVER_GAP,
 ) -> List[SessionReport]:
     sessions: List[SessionReport] = []
     session_start: Optional[datetime] = None
@@ -168,13 +185,14 @@ def build_sessions(
     def anchor() -> Optional[datetime]:
         return session_start
 
-    def start_session(start: datetime, source: str) -> None:
-        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop
+    def start_session(start: datetime, source: str, session_id: Optional[str] = None) -> None:
+        nonlocal session_start, screensaver_start, screensaver_spans, current_source, tracker_pending_stop, current_session_id
         session_start = start
         current_source = source
         screensaver_start = None
         screensaver_spans = []
         tracker_pending_stop = None
+        current_session_id = session_id
 
     def session_limit(start: datetime) -> datetime:
         return start + timedelta(hours=MAX_SESSION_HOURS)
@@ -200,6 +218,9 @@ def build_sessions(
         tracker_pending_stop = None
         current_session_id = None
 
+    def ignore_session_event_during_screensaver() -> bool:
+        return screensaver_start is not None
+
     def flush_pending_tracker_stop(before: datetime) -> None:
         nonlocal tracker_pending_stop
         if tracker_pending_stop is None or session_start is None:
@@ -219,14 +240,19 @@ def build_sessions(
         if event.event_type == "session":
             session_id = event_session_id(event)
 
+            if ignore_session_event_during_screensaver():
+                continue
+
             if event.event_subtype in {"login", "active", "activate"}:
                 if session_start is None:
-                    start_session(event.timestamp, "session-active" if event.event_subtype in {"login", "active"} else "session")
-                    current_session_id = session_id
+                    start_session(
+                        event.timestamp,
+                        "session-active" if event.event_subtype in {"login", "active"} else "session",
+                        session_id,
+                    )
                 elif session_id is not None and current_session_id is not None and session_id != current_session_id:
                     close_session(event.timestamp)
-                    start_session(event.timestamp, "session-active")
-                    current_session_id = session_id
+                    start_session(event.timestamp, "session-active", session_id)
                 elif session_id is not None and current_session_id is None:
                     current_session_id = session_id
             elif event.event_subtype in {"logout", "deactivate"}:
@@ -240,11 +266,14 @@ def build_sessions(
             continue
 
         if event.event_type == "tracker":
+            tracker_session_id = event_session_id(event)
             if event.event_subtype == "start":
                 if tracker_pending_stop is not None and event.timestamp - tracker_pending_stop <= tracker_restart_gap:
                     tracker_pending_stop = None
                 elif session_start is None and current_source == "unknown":
-                    start_session(event.timestamp, "tracker")
+                    start_session(event.timestamp, "tracker", tracker_session_id)
+                elif tracker_session_id is not None and current_session_id is None:
+                    current_session_id = tracker_session_id
             elif event.event_subtype == "stop":
                 if session_start is not None:
                     tracker_pending_stop = event.timestamp
@@ -255,12 +284,24 @@ def build_sessions(
                 if screensaver_start is None:
                     screensaver_start = event.timestamp
             elif event.event_subtype == "deactivate" and screensaver_start is not None:
-                if event.timestamp > screensaver_start:
+                if event.timestamp - screensaver_start >= long_screensaver_gap:
+                    preserved_source = current_source
+                    preserved_session_id = current_session_id
+                    screensaver_boundary = screensaver_start
+                    screensaver_start = None
+                    close_session(screensaver_boundary)
+                    start_session(event.timestamp, preserved_source, preserved_session_id)
+                elif event.timestamp > screensaver_start:
                     screensaver_spans.append(Interval(screensaver_start, event.timestamp))
                 screensaver_start = None
 
     current_anchor = anchor()
     if current_anchor is not None:
+        if screensaver_start is not None and as_of - screensaver_start >= long_screensaver_gap:
+            screensaver_boundary = screensaver_start
+            screensaver_start = None
+            close_session(screensaver_boundary)
+            return merge_sessions(sessions, session_merge_gap)
         if tracker_pending_stop is not None and as_of >= tracker_pending_stop + tracker_restart_gap:
             close_session(tracker_pending_stop)
         else:
@@ -271,17 +312,51 @@ def build_sessions(
     return merge_sessions(sessions, session_merge_gap)
 
 
-def format_debug_timestamp(timestamp: datetime) -> str:
-    local = timestamp.astimezone()
-    return f"{timestamp.isoformat()} | local={local.isoformat(timespec='seconds')}"
+def debug_colors_enabled() -> bool:
+    return sys.stderr.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def colorize(text: str, color: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"{color}{text}{ANSI_RESET}"
+
+
+def format_debug_moment(timestamp: datetime, utc: bool = False) -> str:
+    instant = timestamp.astimezone(timezone.utc) if utc else timestamp.astimezone()
+    return instant.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_debug_interval(start: datetime, end: datetime, utc: bool = False) -> str:
+    start_instant = start.astimezone(timezone.utc) if utc else start.astimezone()
+    end_instant = end.astimezone(timezone.utc) if utc else end.astimezone()
+    if start_instant.date() == end_instant.date():
+        return f"{start_instant.strftime('%Y-%m-%d %H:%M:%S')} -> {end_instant.strftime('%H:%M:%S')}"
+    return f"{start_instant.strftime('%Y-%m-%d %H:%M:%S')} -> {end_instant.strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+def debug_event_color(event_type: str, event_subtype: str) -> str:
+    if event_type == "screensaver":
+        return ANSI_YELLOW
+    if event_type == "session":
+        return ANSI_CYAN if event_subtype in {"active", "activate", "login"} else ANSI_RED
+    if event_type == "system":
+        return ANSI_MAGENTA
+    if event_type == "tracker":
+        return ANSI_GREEN
+    return ANSI_BLUE
 
 
 def debug_print_events(events: List[ActivityEvent]) -> None:
+    colors = debug_colors_enabled()
     print("DEBUG events:", file=sys.stderr)
     for event in events:
+        label = colorize(f"{event.event_type}/{event.event_subtype}", debug_event_color(event.event_type, event.event_subtype), colors)
+        session_id = event_session_id(event) or "-"
+        details = f" details={event.details}" if event.details else ""
         print(
-            f"  #{event.row_number} {format_debug_timestamp(event.timestamp)} "
-            f"{event.event_type}/{event.event_subtype}",
+            f"  #{event.row_number:>3} {label:<28} sid={session_id:<4} "
+            f"local {format_debug_moment(event.timestamp)} | utc {format_debug_moment(event.timestamp, utc=True)}{details}",
             file=sys.stderr,
         )
 
@@ -314,18 +389,23 @@ def debug_print_tracker_start_anomalies(
 
 
 def debug_print_sessions(sessions: List[SessionReport]) -> None:
+    colors = debug_colors_enabled()
     print("DEBUG sessions:", file=sys.stderr)
     for index, session in enumerate(sessions, start=1):
+        source = colorize(session.source, ANSI_BLUE, colors)
         print(
-            f"  {index}. {format_debug_timestamp(session.start)} -> {format_debug_timestamp(session.end)} "
-            f"source={session.source} capped={'yes' if session.capped else 'no'} "
+            f"  {index:>2}. local {format_debug_interval(session.start, session.end)} | "
+            f"utc {format_debug_interval(session.start, session.end, utc=True)} | "
+            f"source={source} capped={'yes' if session.capped else 'no'} "
             f"session_hours={session.session_hours:.2f} screensaver_hours={session.screensaver_hours:.2f} "
             f"active_hours={session.active_hours:.2f}",
             file=sys.stderr,
         )
         for span_index, span in enumerate(session.screensaver_spans, start=1):
             print(
-                f"     screensaver {span_index}: {format_debug_timestamp(span.start)} -> {format_debug_timestamp(span.end)}",
+                f"     {colorize(f'screensaver {span_index}', ANSI_YELLOW, colors)}: "
+                f"local {format_debug_interval(span.start, span.end)} | "
+                f"utc {format_debug_interval(span.start, span.end, utc=True)}",
                 file=sys.stderr,
             )
 
